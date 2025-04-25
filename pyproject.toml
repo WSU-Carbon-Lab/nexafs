@@ -9,7 +9,7 @@ dependencies = [
   "handsdown>=2.1.0",
   "periodictable>=2.0.2",
 ]
-description = "Fitting in python made easy"
+description = "A package for analyzing and fitting NEXAFS data"
 license = "GPL-2.0"
 name = "nexafs"
 readme = "README.md"
