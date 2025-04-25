@@ -4,12 +4,13 @@ This module provides a pandas DataFrame accessor for analyzing, normalizing and
 visualizing NEXAFS (Near-Edge X-ray Absorption Fine Structure) spectroscopy data. The
 accessor enables users to perform common NEXAFS data processing tasks and create
 publication-quality visualizations directly from pandas DataFrames containing
- spectroscopy measurements.
+spectroscopy measurements.
 """
 
 from functools import lru_cache as cache
 from typing import Literal
 
+import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -18,9 +19,10 @@ from periodictable import xsf
 from scipy.constants import physical_constants
 
 # Physical constants
-hc = physical_constants["Planck constant times c"][0]  # J*m
-hc_ev = hc / 1.602176634e-19  # eV*m
-hc_nm = hc / 1e-9  # eV*nm
+h = physical_constants["Planck constant in eV/Hz"][0]  # eV*s
+c = physical_constants["speed of light in vacuum"][0]  # m/s
+# hc in cm
+hc = h * c * 1e7  # cm*eV
 
 
 @pd.api.extensions.register_dataframe_accessor("nexafs")
@@ -78,13 +80,47 @@ class NEXAFSAccessor:
             The pandas DataFrame containing NEXAFS data.
         """
         self._obj = pandas_obj
+        self._chemical_formula: str = ""
+        self._density: float = 1.0
+
+    @property
+    def chemical_formula(self) -> str | None:
+        """Get the chemical formula for the NEXAFS data."""
+        return self._chemical_formula
+
+    @chemical_formula.setter
+    def chemical_formula(self, value: str) -> None:
+        """Set the chemical formula for the NEXAFS data."""
+        if not isinstance(value, str):
+            msg = (
+                "Chemical formula must be a string. "
+                "Please provide a valid chemical formula (e.g., 'C', 'H2O')."
+            )
+            raise TypeError(msg)
+        self._chemical_formula = value
+
+    @property
+    def density(self) -> float | None:
+        """Get the density for the NEXAFS data."""
+        return self._density
+
+    @density.setter
+    def density(self, value: float) -> None:
+        """Set the density for the NEXAFS data."""
+        if not isinstance(value, (int | float)):
+            msg = (
+                "Density must be a numeric value. "
+                "Please provide a valid density (e.g., 1.0 for g/cm³)."
+            )
+            raise TypeError(msg)
+        self._density = value
 
     @cache  # noqa: B019
     def bare_atom(
         self,
-        chemical_formula: str,
         energy: str,
-        density: float = 1.0,
+        chemical_formula: str | None = None,
+        density: float | None = None,
     ) -> pd.Series:
         """
         Calculate the complex index of refraction for a given chemical formula.
@@ -95,12 +131,13 @@ class NEXAFSAccessor:
 
         Parameters
         ----------
-        chemical_formula : str
-            Chemical formula of the compound (e.g., 'C', 'H2O', 'C8H8O2').
         energy : str
             Column name containing energy values in eV.
-        density : float, optional
-            Material density in g/cm³, by default 1.0.
+        chemical_formula : str | None, optional
+            Chemical formula of the compound (e.g., 'C', 'H2O', 'C8H8O2').
+            If None, uses the accessor's stored chemical_formula property.
+        density : float | None, optional
+            Material density in g/cm³. If None, uses the accessor's density property.
 
         Returns
         -------
@@ -111,6 +148,7 @@ class NEXAFSAccessor:
         ------
         ValueError
             If the energy column is not found in the DataFrame or is not numeric.
+            If no chemical formula is provided or stored in the accessor.
         """
         if energy in self._obj.columns and pd.api.types.is_numeric_dtype(
             self._obj[energy]
@@ -123,13 +161,29 @@ class NEXAFSAccessor:
             )
             raise ValueError(msg)
 
+        # Use provided values or fall back to class properties
+        formula = chemical_formula or self._chemical_formula
+        if not formula:
+            msg = (
+                "No chemical formula provided. "
+                "Please provide a chemical formula or set it using the "
+                "chemical_formula property."
+            )
+            raise ValueError(msg)
+
+        mat_density = density if density is not None else self._density
+
         # periodictable expects energy in keV
         energy_kev = energy_ev * 1e-3
 
+        # Store chemical formula and density in class properties
+        if chemical_formula:
+            self.chemical_formula = chemical_formula
+        if density is not None:
+            self.density = density
+
         # Calculate complex index of refraction
-        ba = xsf.index_of_refraction(
-            chemical_formula, density=density, energy=energy_kev
-        )
+        ba = xsf.index_of_refraction(formula, density=mat_density, energy=energy_kev)
 
         # Return as pandas Series with same index as energy column
         # Note: beta is negative of imaginary part in the convention used by
@@ -139,9 +193,9 @@ class NEXAFSAccessor:
     @cache  # noqa: B019
     def beta_bare_atom(
         self,
-        chemical_formula: str,
-        energy: str,
-        density: float = 1.0,
+        chemical_formula: str | None = None,
+        energy: str | None = None,
+        density: float | None = None,
     ) -> pd.Series:
         """
         Calculate the atomic absorption coefficient (beta) for a given material.
@@ -151,12 +205,13 @@ class NEXAFSAccessor:
 
         Parameters
         ----------
-        chemical_formula : str
+        chemical_formula : str | None, optional
             Chemical formula of the compound (e.g., 'C', 'H2O', 'C8H8O2').
-        energy : str
+            If None, uses the accessor's stored chemical_formula property.
+        energy : str, optional
             Column name containing energy values in eV.
-        density : float, optional
-            Material density in g/cm³, by default 1.0.
+        density : float | None, optional
+            Material density in g/cm³. If None, uses the accessor's density property.
 
         Returns
         -------
@@ -168,19 +223,46 @@ class NEXAFSAccessor:
         >>> df = pd.DataFrame({"Energy": np.linspace(280, 320, 100)})
         >>> # Calculate beta for graphite with density 2.26 g/cm³
         >>> df["beta_carbon"] = df.nexafs.beta_bare_atom("C", "Energy", density=2.26)
+        >>>
+        >>> # Set properties first, then calculate
+        >>> df.nexafs.chemical_formula = "C"
+        >>> df.nexafs.density = 2.26
+        >>> df["beta_carbon"] = df.nexafs.beta_bare_atom(energy="Energy")
         """
+        # Use provided values or fall back to class properties
+        formula = chemical_formula or self._chemical_formula
+        if not formula:
+            msg = (
+                "No chemical formula provided. "
+                "Please provide a chemical formula or set it using the "
+                "chemical_formula property."
+            )
+            raise ValueError(msg)
+
+        if energy is None:
+            msg = "Energy column name must be provided."
+            raise ValueError(msg)
+
+        mat_density = density if density is not None else self._density
+
+        # Store the values as properties if provided
+        if chemical_formula:
+            self.chemical_formula = chemical_formula
+        if density is not None:
+            self.density = density
+
         return self.bare_atom(
-            chemical_formula=chemical_formula,
+            chemical_formula=formula,
             energy=energy,
-            density=density,
+            density=mat_density,
         ).apply(lambda x: x.imag)
 
     @cache  # noqa: B019
     def delta_bare_atom(
         self,
-        chemical_formula: str,
-        energy: str,
-        density: float = 1.0,
+        chemical_formula: str | None = None,
+        energy: str | None = None,
+        density: float | None = None,
     ) -> pd.Series:
         """
         Calculate the phase shift coefficient (delta) for a given material.
@@ -190,12 +272,13 @@ class NEXAFSAccessor:
 
         Parameters
         ----------
-        chemical_formula : str
+        chemical_formula : str | None, optional
             Chemical formula of the compound (e.g., 'C', 'H2O', 'C8H8O2').
-        energy : str
+            If None, uses the accessor's stored chemical_formula property.
+        energy : str, optional
             Column name containing energy values in eV.
-        density : float, optional
-            Material density in g/cm³, by default 1.0.
+        density : float | None, optional
+            Material density in g/cm³. If None, uses the accessor's density property.
 
         Returns
         -------
@@ -207,11 +290,38 @@ class NEXAFSAccessor:
         >>> df = pd.DataFrame({"Energy": np.linspace(280, 320, 100)})
         >>> # Calculate delta for silicon with density 2.33 g/cm³
         >>> df["delta_si"] = df.nexafs.delta_bare_atom("Si", "Energy", density=2.33)
+        >>>
+        >>> # Set properties first, then calculate
+        >>> df.nexafs.chemical_formula = "Si"
+        >>> df.nexafs.density = 2.33
+        >>> df["delta_si"] = df.nexafs.delta_bare_atom(energy="Energy")
         """
+        # Use provided values or fall back to class properties
+        formula = chemical_formula or self._chemical_formula
+        if not formula:
+            msg = (
+                "No chemical formula provided. "
+                "Please provide a chemical formula or set it using the "
+                "chemical_formula property."
+            )
+            raise ValueError(msg)
+
+        if energy is None:
+            msg = "Energy column name must be provided."
+            raise ValueError(msg)
+
+        mat_density = density if density is not None else self._density
+
+        # Store the values as properties if provided
+        if chemical_formula:
+            self.chemical_formula = chemical_formula
+        if density is not None:
+            self.density = density
+
         return self.bare_atom(
-            chemical_formula=chemical_formula,
+            chemical_formula=formula,
             energy=energy,
-            density=density,
+            density=mat_density,
         ).apply(lambda x: x.real)
 
     def convert_absorption(
@@ -260,9 +370,8 @@ class NEXAFSAccessor:
             A = self._obj[absorption_coefficient].astype(float)
         else:
             msg = (
-                f"Column '{absorption_coefficient}' not found in DataFrame or is not\
-                numeric. "
-                "Please provide a valid column name with absorption measurements."
+                f"Column '{absorption_coefficient}' not found in DataFrame or is not "
+                "numeric. Please provide a valid column name with measurements."
             )
             raise ValueError(msg)
 
@@ -271,8 +380,8 @@ class NEXAFSAccessor:
             self._obj[energy_column]
         ):
             energy = self._obj[energy_column].astype(float)
-            # Calculate wavelength in meters from energy in eV
-            wavelength = hc_ev / energy
+            # Calculate wavelength in cm from energy in eV using hc constant
+            wavelength_cm = hc / energy
         else:
             msg = (
                 f"Column '{energy_column}' not found in DataFrame or is not numeric. "
@@ -281,14 +390,14 @@ class NEXAFSAccessor:
             raise ValueError(msg)
 
         # Apply Beer-Lambert conversion: beta = A * lambda / (4 * pi)
-        return A * wavelength / (4 * np.pi)
+        return A * wavelength_cm / (4 * np.pi)
 
     def normalize(
         self,
-        chemical_formula: str,
         nexafs_column: str,
         energy_column: str,
-        density: float = 1.0,
+        chemical_formula: str | None = None,
+        density: float | None = None,
         nexafs_type: Literal["electron-yield", "absorption"] = "electron-yield",
         pre_edge_range: tuple[float, float] | None = None,
         post_edge_range: tuple[float, float] | None = None,
@@ -304,14 +413,15 @@ class NEXAFSAccessor:
 
         Parameters
         ----------
-        chemical_formula : str
-            Chemical formula of the compound (e.g., 'C', 'H2O', 'C8H8O2').
         nexafs_column : str
             Column name containing the raw NEXAFS data to normalize.
         energy_column : str
             Column name containing energy values in eV.
-        density : float, optional
-            Material density in g/cm³, by default 1.0.
+        chemical_formula : str | None, optional
+            Chemical formula of the compound (e.g., 'C', 'H2O', 'C8H8O2').
+            If None, uses the accessor's stored chemical_formula property.
+        density : float | None, optional
+            Material density in g/cm³. If None, uses the accessor's density property.
         nexafs_type : Literal["electron-yield", "absorption"], optional
             Type of NEXAFS measurement:
             - "electron-yield": TEY or PEY measurements (default)
@@ -341,9 +451,10 @@ class NEXAFSAccessor:
         ...     post_edge_range=(320, 325),
         ... )
 
-        >>> # Group-wise normalization by sample
+        >>> # Group-wise normalization by sample using preset properties
+        >>> df.nexafs.chemical_formula = "C"
+        >>> df.nexafs.density = 2.26
         >>> df["normalized"] = df.nexafs.normalize(
-        ...     chemical_formula="C",
         ...     nexafs_column="Raw_Intensity",
         ...     energy_column="Energy",
         ...     group_by="Sample",
@@ -354,6 +465,24 @@ class NEXAFSAccessor:
         ValueError
             If columns are not found, or if pre/post ranges don't contain data points.
         """
+        # Use provided formula or fall back to class property
+        formula = chemical_formula or self._chemical_formula
+        if not formula:
+            msg = (
+                "No chemical formula provided. "
+                "Please provide a chemical formula or set it using the "
+                "chemical_formula property."
+            )
+            raise ValueError(msg)
+
+        mat_density = density if density is not None else self._density
+
+        # Store values in class properties if provided
+        if chemical_formula:
+            self.chemical_formula = chemical_formula
+        if density is not None:
+            self.density = density
+
         # If grouping is specified, apply normalization to each group
         if group_by is not None:
             if isinstance(group_by, str):
@@ -365,11 +494,13 @@ class NEXAFSAccessor:
             # Apply normalization to each group
             for _, group in self._obj.groupby(group_by):
                 group_accessor = NEXAFSAccessor(group)
+                # Copy the chemical formula and density to the group accessor
+                group_accessor.chemical_formula = formula
+                group_accessor.density = mat_density
+
                 normalized = group_accessor.normalize(
-                    chemical_formula=chemical_formula,
                     nexafs_column=nexafs_column,
                     energy_column=energy_column,
-                    density=density,
                     nexafs_type=nexafs_type,
                     pre_edge_range=pre_edge_range,
                     post_edge_range=post_edge_range,
@@ -421,7 +552,7 @@ class NEXAFSAccessor:
 
         # Get atomic beta values and align with the experimental data
         beta_atomic_aligned = (
-            self.beta_bare_atom(chemical_formula, energy_column, density)
+            self.beta_bare_atom(energy=energy_column)
             .reindex(raw_intensity.index)
             .fillna(0)
         )
@@ -461,7 +592,9 @@ class NEXAFSAccessor:
         title: str | None = None,
         xlabel: str | None = None,
         ylabel: str | None = None,
-        color: str = "red",
+        color: str | pd.Series | None = "red",
+        color_column: str | None = None,
+        palette: str | list | None = "viridis",
         ref_color: str = "black",
         figsize: tuple[float, float] = (8, 6),
         group_by: str | list[str] | None = None,
@@ -471,6 +604,7 @@ class NEXAFSAccessor:
         grid: bool = True,
         legend: bool = True,
         legend_title: str | None = None,
+        colorbar: bool = False,
         show: bool = True,
         **kwargs,
     ) -> Figure | dict[str, Figure]:
@@ -499,8 +633,17 @@ class NEXAFSAccessor:
             X-axis label. If None, the x column name will be used.
         ylabel : Optional[str], optional
             Y-axis label. If None, the y column name will be used.
-        color : str, optional
-            Color for the primary spectrum, by default "red".
+        color : Union[str, pd.Series, None], optional
+            Color for the primary spectrum. Can be:
+            - A string color name (e.g., "red")
+            - A pandas Series with colors for each data point
+            - None to use color_column for coloring
+        color_column : Optional[str], optional
+            Column name to use for coloring data points when color=None.
+            Useful for highlighting trends in a third variable.
+        palette : Union[str, list, None], optional
+            Color palette to use when color_column is specified.
+            Can be a seaborn/matplotlib colormap name or a list of colors.
         ref_color : str, optional
             Color for the reference spectrum, by default "black".
         figsize : Tuple[float, float], optional
@@ -515,12 +658,14 @@ class NEXAFSAccessor:
             Whether to show grid lines, by default True.
         legend : bool, optional
             Whether to show a legend, by default True.
+        colorbar : bool, optional
+            Whether to show a colorbar when using color_column, by default False.
         save_path : Optional[str], optional
             Path to save the figure(s). If group_by is used, group name will be added.
         show : bool, optional
             Whether to display the plot, by default True.
         **kwargs
-            Additional keyword arguments passed to matplotlib's plot function.
+            Additional keyword arguments passed to pandas plot function.
 
         Returns
         -------
@@ -533,6 +678,15 @@ class NEXAFSAccessor:
         >>> # Basic spectrum plot
         >>> fig = df.nexafs.plot_spectrum(
         ...     x="Energy", y="Normalized", title="Carbon K-edge NEXAFS"
+        ... )
+
+        >>> # Use a color column to show a third variable
+        >>> fig = df.nexafs.plot_spectrum(
+        ...     x="Energy",
+        ...     y="Intensity",
+        ...     color_column="Temperature",
+        ...     palette="plasma",
+        ...     colorbar=True,
         ... )
 
         >>> # Compare multiple samples
@@ -579,11 +733,14 @@ class NEXAFSAccessor:
                     xlabel=xlabel,
                     ylabel=ylabel,
                     color=color,
+                    color_column=color_column,
+                    palette=palette,
                     ref_color=ref_color,
                     figsize=figsize,
                     grid=grid,
                     legend=legend,
                     legend_title=legend_title,
+                    colorbar=colorbar,
                     show=False,  # Don't show individual plots
                     **kwargs,
                 )
@@ -607,22 +764,73 @@ class NEXAFSAccessor:
 
             return figures
 
-        # Single plot creation
+        # Create a copy of the plotting data
+        plot_data = self._obj[[x, y]].copy()
+
+        # Add reference column if needed
+        if reference and reference in self._obj.columns:
+            plot_data[reference] = self._obj[reference]
+
+        # Prepare figure
         fig, ax = plt.subplots(figsize=figsize)
 
-        # Plot main spectrum
-        ax.plot(self._obj[x], self._obj[y], label=y, color=color, linewidth=2, **kwargs)
+        # Handle coloring based on a column
+        if color_column is not None and color_column in self._obj.columns:
+            # Use pandas scatter plot with color mapping
+            plot_data[color_column] = self._obj[color_column]
 
-        # Plot reference data if provided
-        if reference and reference in self._obj.columns:
-            ax.plot(
-                self._obj[x],
-                self._obj[reference],
-                label=reference,
-                color=ref_color,
-                linewidth=2,
-                linestyle="--",
+            # Create a colormap
+            if isinstance(palette, list):
+                cmap = mcolors.LinearSegmentedColormap.from_list("custom", palette)
+            else:
+                cmap = plt.get_cmap(palette or "viridis")
+
+            # Use pandas scatter plot with color mapping (leveraging pandas backend)
+            scatter = plot_data.plot.scatter(
+                x=x,
+                y=y,
+                c=color_column,
+                colormap=cmap,
+                title=title or f"{y} vs {x}",
+                xlabel=xlabel or x,
+                ylabel=ylabel or y,
+                ax=ax,
+                **kwargs,
             )
+
+            # Add colorbar if requested
+            if colorbar:
+                plt.colorbar(scatter.collections[0], ax=ax, label=color_column)
+
+        else:
+            # Use pandas plot for line
+            plot_data.plot(
+                x=x,
+                y=y,
+                color=color,
+                title=title or f"{y} vs {x}",
+                xlabel=xlabel or x,
+                ylabel=ylabel or y,
+                label=y,
+                ax=ax,
+                linewidth=2,
+                legend=legend,
+                **kwargs,
+            )
+
+            # Add reference line if provided
+            if reference and reference in self._obj.columns:
+                ax.plot(
+                    self._obj[x],
+                    self._obj[reference],
+                    color=ref_color,
+                    linestyle="--",
+                    linewidth=2,
+                    label=reference,
+                )
+
+                if legend:
+                    ax.legend(title=legend_title)
 
         # Highlight pre-edge region if provided
         if pre_edge_range:
@@ -644,21 +852,16 @@ class NEXAFSAccessor:
                 label="Post-edge Region",
             )
 
-        # Set labels and title
-        ax.set_xlabel(xlabel or x)
-        ax.set_ylabel(ylabel or y)
-        ax.set_title(title or f"{y} vs {x}")
-
         # Add grid if requested
         if grid:
             ax.grid(True, linestyle=":", alpha=0.6)
 
-        # Create legend with optional title
+        # Ensure legend has all elements
         if legend:
-            if legend_title:
-                ax.legend(title=legend_title, loc="best")
-            else:
-                ax.legend(loc="best")
+            handles, labels = ax.get_legend_handles_labels()
+            if pre_edge_range or post_edge_range:
+                # Recreate legend to include regions
+                ax.legend(handles, labels, title=legend_title, loc="best")
 
         plt.tight_layout()
 
@@ -676,7 +879,7 @@ class NEXAFSAccessor:
         x: str,
         y: str,
         z: str,
-        colormap: str = "viridis",
+        colormap: str | list = "viridis",
         title: str | None = None,
         xlabel: str | None = None,
         ylabel: str | None = None,
@@ -686,6 +889,9 @@ class NEXAFSAccessor:
         vmin: float | None = None,
         vmax: float | None = None,
         save_path: str | None = None,
+        pivot_kwargs: dict | None = None,
+        *,  # Force keyword-only arguments after this point
+        show: bool = True,
         **kwargs,
     ) -> Figure:
         """
@@ -702,8 +908,11 @@ class NEXAFSAccessor:
             Column name for the y-axis data (e.g., angle, time, position).
         z : str
             Column name for the intensity data to be displayed as color.
-        colormap : str, optional
-            Matplotlib colormap name, by default "viridis".
+        colormap : Union[str, list], optional
+            Colormap for the heatmap. Can be:
+            - A string with a matplotlib/seaborn colormap name (e.g., "viridis")
+            - A list of colors to create a custom colormap
+            By default "viridis".
         title : Optional[str], optional
             Plot title. If None, a title will be generated.
         xlabel : Optional[str], optional
@@ -722,8 +931,12 @@ class NEXAFSAccessor:
             Maximum value for colormap scaling.
         save_path : Optional[str], optional
             Path to save the figure.
+        pivot_kwargs : Optional[dict], optional
+            Additional keyword arguments for pandas pivot_table.
+        show : bool, optional
+            Whether to display the plot, by default True.
         **kwargs
-            Additional keyword arguments passed to plt.imshow.
+            Additional keyword arguments passed to plt.pcolormesh.
 
         Returns
         -------
@@ -741,34 +954,58 @@ class NEXAFSAccessor:
         ...     colormap="plasma",
         ... )
 
+        >>> # Create heatmap with custom color palette and aggregation
+        >>> fig = df.nexafs.plot_heatmap(
+        ...     x="Energy",
+        ...     y="Angle",
+        ...     z="Intensity",
+        ...     colormap=["blue", "green", "yellow", "red"],
+        ...     pivot_kwargs={"aggfunc": "max"},
+        ... )
+
         Notes
         -----
         This method works best with gridded data. If your data is not already
-        on a regular grid, consider using pandas pivot_table before plotting.
+        on a regular grid, consider specifying a different aggregation function
+        in pivot_kwargs (default is "mean").
         """
-        # Extract data from DataFrame
-        x_values = self._obj[x].unique()
-        y_values = self._obj[y].unique()
+        from typing import Any
 
-        # Create a pivot table to get a 2D array
-        pivot = self._obj.pivot_table(index=y, columns=x, values=z, aggfunc="mean")
+        # Create a pivot table with the data - only use safe defaults
+        safe_pivot_args: dict[str, Any] = {
+            "index": y,
+            "columns": x,
+            "values": z,
+            "aggfunc": "mean",
+        }
 
-        # Create the figure and plot
+        # If additional pivot args provided, carefully handle them
+        if pivot_kwargs:
+            # Only allow non-boolean args or explicitly boolean values
+            for k, v in pivot_kwargs.items():
+                if k not in ["margins", "dropna", "observed", "sort"] or isinstance(
+                    v, bool
+                ):
+                    safe_pivot_args[k] = v
+
+        # Create the pivot table with only safe arguments
+        pivot = self._obj.pivot_table(**safe_pivot_args)
+
+        # Create figure and axes
         fig, ax = plt.subplots(figsize=figsize)
 
-        # Plot the heatmap
-        im = ax.imshow(
-            pivot.values,
-            aspect="auto",
-            origin="lower",
-            interpolation=interpolation,
-            cmap=colormap,
-            extent=(
-                float(min(x_values)),
-                float(max(x_values)),
-                float(min(y_values)),
-                float(max(y_values)),
-            ),
+        # Prepare colormap
+        if isinstance(colormap, list):
+            cmap = mcolors.LinearSegmentedColormap.from_list("custom", colormap)
+        else:
+            cmap = colormap
+
+        # Use matplotlib's pcolormesh directly
+        pcm = ax.pcolormesh(
+            pivot.columns,  # x values
+            pivot.index,  # y values
+            pivot.values,  # z values
+            cmap=cmap,
             vmin=vmin,
             vmax=vmax,
             **kwargs,
@@ -779,8 +1016,8 @@ class NEXAFSAccessor:
         ax.set_ylabel(ylabel or y)
         ax.set_title(title or f"{z} as a function of {x} and {y}")
 
-        # Add colorbar
-        cbar = plt.colorbar(im, ax=ax)
+        # Add colorbar with label
+        cbar = plt.colorbar(pcm, ax=ax)
         cbar.set_label(zlabel or z)
 
         plt.tight_layout()
@@ -789,7 +1026,9 @@ class NEXAFSAccessor:
         if save_path:
             fig.savefig(save_path, dpi=300, bbox_inches="tight")
 
-        plt.show()
+        if show:
+            plt.show()
+
         return fig
 
     def plot_normalized_nexafs(
@@ -804,6 +1043,9 @@ class NEXAFSAccessor:
         edge_label: str | None = None,
         figsize: tuple[float, float] = (8, 6),
         save_path: str | None = None,
+        *,  # Force keyword-only arguments after this point
+        show: bool = True,
+        **kwargs,
     ) -> Figure:
         """
         Generate a plot comparing normalized NEXAFS data to atomic beta.
@@ -835,6 +1077,10 @@ class NEXAFSAccessor:
             Figure dimensions (width, height) in inches, by default (8, 6).
         save_path : str | None, optional
             Path to save the figure.
+        show : bool, optional
+            Whether to display the plot, by default True.
+        **kwargs
+            Additional keyword arguments passed to pandas plotting functions.
 
         Returns
         -------
@@ -854,28 +1100,38 @@ class NEXAFSAccessor:
         ...     edge_label="C K-edge",
         ... )
         """
-        energy = self._obj[energy_column]
+        # Create a copy of the plotting data
+        plot_data = self._obj[[energy_column, normalized_intensity]].copy()
+
+        # Create figure and axes
         fig, ax = plt.subplots(figsize=figsize)
 
-        # Plot normalized experimental data
-        ax.plot(
-            energy,
-            self._obj[normalized_intensity],
+        # Plot normalized data using pandas plot
+        plot_data.plot(
+            x=energy_column,
+            y=normalized_intensity,
             label="NEXAFS (Normalized)",
             color="red",
             linewidth=2,
+            ax=ax,
+            **kwargs,
         )
 
         # Calculate and plot atomic beta reference if formula provided
-        if chemical_formula:
+        if chemical_formula or self._chemical_formula != "":
             beta_atomic = self.beta_bare_atom(
                 chemical_formula=chemical_formula,
                 energy=energy_column,
             )
 
+            # Add beta atomic to the plotting data
+            beta_col = f"beta_atomic_{chemical_formula}"
+            plot_data[beta_col] = beta_atomic
+
+            # Plot beta atomic reference
             ax.plot(
-                energy,
-                beta_atomic,
+                plot_data[energy_column],
+                plot_data[beta_col],
                 label=r"$\beta$ (atomic)",
                 color="black",
                 linewidth=2,
@@ -887,18 +1143,18 @@ class NEXAFSAccessor:
             ax.axvspan(
                 pre_edge_range[0],
                 pre_edge_range[1],
-                color="grey",
+                color="lightgrey",
                 alpha=0.2,
-                label="Pre-edge Norm. Region",
+                label="Pre-edge Region",
             )
 
         if post_edge_range:
             ax.axvspan(
                 post_edge_range[0],
                 post_edge_range[1],
-                color="grey",
+                color="darkgrey",
                 alpha=0.3,
-                label="Post-edge Norm. Region",
+                label="Post-edge Region",
             )
 
         # Set labels and title
@@ -918,32 +1174,42 @@ class NEXAFSAccessor:
         ax.grid(True, linestyle=":", alpha=0.6)
         ax.ticklabel_format(axis="y", style="sci", scilimits=(0, 0))
 
-        # Get handles and labels for legend
-        handles, labels = ax.get_legend_handles_labels()
-
         # Add raw intensity on secondary axis if provided
         if raw_intensity and raw_intensity in self._obj.columns:
+            # Create secondary y-axis
             ax2 = ax.twinx()
-            (line2,) = ax2.plot(
-                energy,
-                self._obj[raw_intensity],
+
+            # Add raw intensity to the plot data
+            plot_data[raw_intensity] = self._obj[raw_intensity]
+
+            # Plot raw intensity on secondary axis
+            ax2.plot(
+                plot_data[energy_column],
+                plot_data[raw_intensity],
                 label="Raw Intensity",
                 color="blue",
                 alpha=0.4,
                 linestyle=":",
             )
+
             ax2.set_ylabel("Raw Intensity (arb. units)", color="blue")
             ax2.tick_params(axis="y", labelcolor="blue")
-            handles.append(line2)
-            labels.append("Raw Intensity")
 
-        # Create legend
-        ax.legend(handles, labels, loc="best")
+            # Create combined legend
+            lines1, labels1 = ax.get_legend_handles_labels()
+            lines2, labels2 = ax2.get_legend_handles_labels()
+            ax.legend(lines1 + lines2, labels1 + labels2, loc="best")
+        else:
+            # Standard legend
+            ax.legend(loc="best")
+
         plt.tight_layout()
 
         # Save if path provided
         if save_path:
             fig.savefig(save_path, dpi=300, bbox_inches="tight")
 
-        plt.show()
+        if show:
+            plt.show()
+
         return fig

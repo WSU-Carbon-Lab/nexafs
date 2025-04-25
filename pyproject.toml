@@ -8,6 +8,7 @@ dependencies = [
   "numba>=0.60.0",
   "handsdown>=2.1.0",
   "periodictable>=2.0.2",
+  "seaborn>=0.13.2",
 ]
 description = "A package for analyzing and fitting NEXAFS data"
 license = "GPL-2.0"
