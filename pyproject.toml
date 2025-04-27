@@ -15,7 +15,7 @@ name = "nexafs"
 readme = "README.md"
 repository = "https://github.com/WSU-Carbon-Lab/ezfit"
 requires-python = ">=3.10"
-version = "0.1.1"
+version = "0.1.2"
 
 [project.optional-dependencies]
 dev = [
